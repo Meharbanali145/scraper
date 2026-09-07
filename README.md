@@ -73,7 +73,15 @@ they failed.
 ## Sample run report
 
 ```json
-PASTE YOUR ACTUAL output/run-report.json CONTENT HERE
+{
+  "start_time": "2026-09-07T05:26:21.691Z",
+  "duration_ms": 3669,
+  "catalogue_pages_fetched": 3,
+  "cache_hits": 63,
+  "valid_records": 60,
+  "invalid_records": 0,
+  "failed_pages": 0
+}
 ```
 
 ## Why this needed no browser
