@@ -1,9 +1,69 @@
 import { writeFile, readFile, mkdir } from "fs/promises";
 import { existsSync } from "fs";
 import * as cheerio from "cheerio";
+import { z } from "zod";
 
 const USER_AGENT = "FlyRankInternshipA9/1.0 (+https://github.com/Meharbanali145/scraper.git)";
 const CACHE_DIR = "./cache";
+
+const BookSchema = z.object({
+  title: z.string().min(1),
+  product_url: z.string().url(),
+  price_text: z.string(),
+  price_gbp: z.number().positive(),
+  availability_text: z.string(),
+  rating_text: z.string().nullable(),
+  description: z.string().nullable(),
+  source_page: z.string().url(),
+  fetched_at: z.string(),
+});
+
+function normalizeRecord(raw) {
+  const priceMatch = raw.price_text.match(/[\d.]+/);
+  const price_gbp = priceMatch ? parseFloat(priceMatch[0]) : NaN;
+
+  return {
+    ...raw,
+    price_gbp,
+  };
+}
+
+function validateRecords(rawRecords) {
+  const validRecords = [];
+  const invalidRecords = [];
+  const seenUrls = new Set();
+
+  for (const raw of rawRecords) {
+    const normalized = normalizeRecord(raw);
+
+    if (seenUrls.has(normalized.product_url)) {
+      continue; // duplicate — skip silently, canonical URL already counted
+    }
+
+    const result = BookSchema.safeParse(normalized);
+
+    if (result.success) {
+      validRecords.push(result.data);
+      seenUrls.add(normalized.product_url);
+    } else {
+      invalidRecords.push({
+        record: normalized,
+        reason: result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+      });
+    }
+  }
+
+  return { validRecords, invalidRecords };
+}
+
+async function storeRecords(validRecords, invalidRecords) {
+  await mkdir("./output", { recursive: true });
+  await writeFile("./output/books.json", JSON.stringify(validRecords, null, 2), "utf-8");
+  await writeFile("./output/errors.json", JSON.stringify(invalidRecords, null, 2), "utf-8");
+
+  console.log(`valid_records=${validRecords.length}`);
+  console.log(`invalid_records=${invalidRecords.length}`);
+}
 
 async function politeFetch(url) {
   const controller = new AbortController();
@@ -140,7 +200,9 @@ async function extractAllBooks(bookUrls) {
 
 async function main() {
   const bookUrls = await discoverAllBookUrls();
-  const records = await extractAllBooks(bookUrls);
+  const rawRecords = await extractAllBooks(bookUrls);
+  const { validRecords, invalidRecords } = validateRecords(rawRecords);
+  await storeRecords(validRecords, invalidRecords);
 }
 
 main().catch((err) => console.error("Fatal error:", err.message));
