@@ -7,7 +7,7 @@ const CACHE_DIR = "./cache";
 
 async function politeFetch(url) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout
+  const timeout = setTimeout(() => controller.abort(), 8000);
 
   try {
     const response = await fetch(url, {
@@ -26,7 +26,7 @@ async function fetchAndCache(url, cachePath) {
   if (existsSync(cachePath)) {
     const html = await readFile(cachePath, "utf-8");
     console.log(`CACHE HIT: ${cachePath} (${html.length} bytes)`);
-    return html;
+    return { html, wasCached: true };
   }
 
   const response = await politeFetch(url);
@@ -39,11 +39,8 @@ async function fetchAndCache(url, cachePath) {
   await mkdir(CACHE_DIR, { recursive: true });
   await writeFile(cachePath, html, "utf-8");
   console.log(`FETCH: ${url} → ${cachePath} (${html.length} bytes)`);
-  return html;
+  return { html, wasCached: false };
 }
-
-
-main().catch((err) => console.error("Fatal error:", err.message));
 
 async function getBookLinksFromPage(html, pageUrl) {
   const $ = cheerio.load(html);
@@ -55,7 +52,6 @@ async function getBookLinksFromPage(html, pageUrl) {
     links.push(absoluteUrl);
   });
 
-  // find the "next" link, if it exists
   const nextHref = $("li.next a").attr("href");
   const nextUrl = nextHref ? new URL(nextHref, pageUrl).toString() : null;
 
@@ -70,7 +66,7 @@ async function discoverAllBookUrls() {
 
   while (pageUrl && pageNum <= MAX_PAGES) {
     const cachePath = `${CACHE_DIR}/catalogue-page-${pageNum}.html`;
-    const html = await fetchAndCache(pageUrl, cachePath);
+    const { html } = await fetchAndCache(pageUrl, cachePath);
 
     const { links, nextUrl } = await getBookLinksFromPage(html, pageUrl);
     allLinks.push(...links);
@@ -92,10 +88,59 @@ async function discoverAllBookUrls() {
   return uniqueUrls;
 }
 
-async function main() {
-  const url = "https://books.toscrape.com/catalogue/page-1.html";
-  const cachePath = `${CACHE_DIR}/catalogue-page-1.html`;
-  const bookUrls = await discoverAllBookUrls();
+function extractBookDetails(html, bookUrl, sourcePageUrl) {
+  const $ = cheerio.load(html);
+  const productArea = $(".product_page");
 
-  await fetchAndCache(url, cachePath);
+  const title = productArea.find("h1").text().trim();
+  const priceText = productArea.find(".price_color").first().text().trim();
+  const availabilityText = productArea.find(".availability").text().trim().replace(/\s+/g, " ");
+
+  const ratingClass = productArea.find("p.star-rating").attr("class") || "";
+  const ratingText = ratingClass.replace("star-rating", "").trim() || null;
+
+  const descriptionEl = productArea.find("#product_description").next("p");
+  const description = descriptionEl.length ? descriptionEl.text().trim() : null;
+
+  return {
+    title,
+    product_url: bookUrl,
+    price_text: priceText,
+    availability_text: availabilityText,
+    rating_text: ratingText,
+    description,
+    source_page: sourcePageUrl,
+    fetched_at: new Date().toISOString(),
+  };
 }
+
+async function extractAllBooks(bookUrls) {
+  const records = [];
+
+  for (let i = 0; i < bookUrls.length; i++) {
+  const url = bookUrls[i];
+  const urlParts = url.split("/").filter(Boolean);
+  const bookId = urlParts[urlParts.length - 2];
+  const cachePath = `${CACHE_DIR}/book-${bookId}.html`;
+
+  const { html, wasCached } = await fetchAndCache(url, cachePath);
+  const record = extractBookDetails(html, url, url);
+  records.push(record);
+
+  if (!wasCached) {
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
+  console.log(`detail_pages=${records.length}`);
+  console.log("Sample record:", JSON.stringify(records[0], null, 2));
+
+  return records;
+}
+
+async function main() {
+  const bookUrls = await discoverAllBookUrls();
+  const records = await extractAllBooks(bookUrls);
+}
+
+main().catch((err) => console.error("Fatal error:", err.message));
