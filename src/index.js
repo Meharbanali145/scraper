@@ -3,6 +3,9 @@ import { existsSync } from "fs";
 import * as cheerio from "cheerio";
 import { z } from "zod";
 
+let cacheHitCount = 0;
+
+
 const USER_AGENT = "FlyRankInternshipA9/1.0 (+https://github.com/Meharbanali145/scraper.git)";
 const CACHE_DIR = "./cache";
 
@@ -26,6 +29,21 @@ function normalizeRecord(raw) {
     ...raw,
     price_gbp,
   };
+}
+
+async function writeRunReport(startTime, stats) {
+  const report = {
+    start_time: startTime,
+    duration_ms: Date.now() - new Date(startTime).getTime(),
+    catalogue_pages_fetched: 3,
+    cache_hits: stats.cacheHits,
+    valid_records: stats.validRecords,
+    invalid_records: stats.invalidRecords,
+    failed_pages: stats.failedPages,
+  };
+
+  await writeFile("./output/run-report.json", JSON.stringify(report, null, 2), "utf-8");
+  console.log("Run report written:", JSON.stringify(report, null, 2));
 }
 
 function validateRecords(rawRecords) {
@@ -65,7 +83,7 @@ async function storeRecords(validRecords, invalidRecords) {
   console.log(`invalid_records=${invalidRecords.length}`);
 }
 
-async function politeFetch(url) {
+async function politeFetch(url, attempt = 1) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
 
@@ -75,9 +93,19 @@ async function politeFetch(url) {
       signal: controller.signal,
     });
     clearTimeout(timeout);
+
+    if (response.status >= 500 && attempt < 2) {
+      await new Promise((r) => setTimeout(r, 1000));
+      return politeFetch(url, attempt + 1);
+    }
+
     return response;
   } catch (err) {
     clearTimeout(timeout);
+    if (attempt < 2 && err.name === "AbortError") {
+      await new Promise((r) => setTimeout(r, 1000));
+      return politeFetch(url, attempt + 1);
+    }
     throw err;
   }
 }
@@ -86,14 +114,15 @@ async function fetchAndCache(url, cachePath) {
   if (existsSync(cachePath)) {
     const html = await readFile(cachePath, "utf-8");
     console.log(`CACHE HIT: ${cachePath} (${html.length} bytes)`);
+    cacheHitCount++;
     return { html, wasCached: true };
   }
 
   const response = await politeFetch(url);
 
   if (response.status !== 200) {
-    throw new Error(`Failed fetch: ${url} returned status ${response.status}`);
-  }
+  throw new Error(`Failed fetch: ${url} returned status ${response.status}`);
+}
 
   const html = await response.text();
   await mkdir(CACHE_DIR, { recursive: true });
@@ -176,33 +205,48 @@ function extractBookDetails(html, bookUrl, sourcePageUrl) {
 
 async function extractAllBooks(bookUrls) {
   const records = [];
+  const failedPages = [];
 
   for (let i = 0; i < bookUrls.length; i++) {
-  const url = bookUrls[i];
-  const urlParts = url.split("/").filter(Boolean);
-  const bookId = urlParts[urlParts.length - 2];
-  const cachePath = `${CACHE_DIR}/book-${bookId}.html`;
+    const url = bookUrls[i];
+    const urlParts = url.split("/").filter(Boolean);
+    const bookId = urlParts[urlParts.length - 2];
+    const cachePath = `${CACHE_DIR}/book-${bookId}.html`;
 
-  const { html, wasCached } = await fetchAndCache(url, cachePath);
-  const record = extractBookDetails(html, url, url);
-  records.push(record);
+    try {
+      const { html, wasCached } = await fetchAndCache(url, cachePath);
+      const record = extractBookDetails(html, url, url);
+      records.push(record);
 
-  if (!wasCached) {
-    await new Promise((r) => setTimeout(r, 500));
+      if (!wasCached) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    } catch (err) {
+      console.log(`SKIPPED (failed page): ${url} — ${err.message}`);
+      failedPages.push({ url, reason: err.message });
+    }
   }
-}
 
   console.log(`detail_pages=${records.length}`);
-  console.log("Sample record:", JSON.stringify(records[0], null, 2));
+  console.log(`failed_pages=${failedPages.length}`);
 
-  return records;
+  return { records, failedPages };
 }
 
 async function main() {
+  const startTime = new Date().toISOString();
+
   const bookUrls = await discoverAllBookUrls();
-  const rawRecords = await extractAllBooks(bookUrls);
+  const { records: rawRecords, failedPages } = await extractAllBooks(bookUrls);
   const { validRecords, invalidRecords } = validateRecords(rawRecords);
   await storeRecords(validRecords, invalidRecords);
+
+  await writeRunReport(startTime, {
+  cacheHits: cacheHitCount,
+  validRecords: validRecords.length,
+  invalidRecords: invalidRecords.length,
+  failedPages: failedPages.length,
+});
 }
 
 main().catch((err) => console.error("Fatal error:", err.message));
